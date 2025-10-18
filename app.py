@@ -1,255 +1,183 @@
 from flask import Flask, request, jsonify
-from datetime import datetime
-import cloudscraper
-import json
-from bs4 import BeautifulSoup
-import logging
 import os
-import gzip
-import brotli
+import requests
+import logging
+import json
+from datetime import datetime
 
 app = Flask(__name__)
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-class IVASSMSClient:
-    def __init__(self):
-        self.scraper = cloudscraper.create_scraper()
-        self.base_url = "https://www.ivasms.com"
-        self.logged_in = False
-        self.csrf_token = None
-        
-        self.scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'en-US,en;q=0.9',
-        })
-
-    def decompress_response(self, response):
-        encoding = response.headers.get('Content-Encoding', '').lower()
-        content = response.content
-        try:
-            if encoding == 'gzip':
-                content = gzip.decompress(content)
-            elif encoding == 'br':
-                content = brotli.decompress(content)
-            return content.decode('utf-8', errors='replace')
-        except Exception as e:
-            return response.text
-
-    def load_cookies(self):
-        try:
-            cookies_env = os.getenv("COOKIES_JSON")
-            if not cookies_env:
-                logger.error("COOKIES_JSON environment variable not set")
-                return None
-            
-            cookies_raw = json.loads(cookies_env)
-            logger.info("Cookies loaded from environment")
-            
-            if isinstance(cookies_raw, list):
-                cookies_dict = {}
-                for cookie in cookies_raw:
-                    if 'name' in cookie and 'value' in cookie:
-                        cookies_dict[cookie['name']] = cookie['value']
-                return cookies_dict
-            else:
-                logger.error("Invalid cookies format")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error loading cookies: {e}")
-            return None
-
-    def login_with_cookies(self):
-        cookies = self.load_cookies()
-        if not cookies:
-            return False
-        
-        # Clear existing cookies and set new ones
-        self.scraper.cookies.clear()
-        for name, value in cookies.items():
-            self.scraper.cookies.set(name, value, domain="www.ivasms.com")
-        
-        try:
-            response = self.scraper.get(f"{self.base_url}/portal/sms/received", timeout=15)
-            if response.status_code == 200:
-                html_content = self.decompress_response(response)
-                soup = BeautifulSoup(html_content, 'html.parser')
-                csrf_input = soup.find('input', {'name': '_token'})
-                if csrf_input:
-                    self.csrf_token = csrf_input.get('value')
-                    self.logged_in = True
-                    logger.info("✅ Successfully logged in to IVAS SMS")
-                    return True
-                else:
-                    logger.error("❌ CSRF token not found")
-                    return False
-            else:
-                logger.error(f"❌ Login failed with status: {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ Login error: {e}")
-            return False
-
-    def get_sms_data(self, from_date="", to_date=""):
-        if not self.logged_in:
-            return None
-        
-        try:
-            payload = {
-                'from': from_date,
-                'to': to_date,
-                '_token': self.csrf_token
-            }
-            
-            headers = {
-                'Accept': 'text/html, */*; q=0.01',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Origin': self.base_url,
-                'Referer': f"{self.base_url}/portal/sms/received"
-            }
-            
-            response = self.scraper.post(
-                f"{self.base_url}/portal/sms/received/getsms",
-                data=payload,
-                headers=headers,
-                timeout=15
-            )
-            
-            if response.status_code == 200:
-                html_content = self.decompress_response(response)
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # Extract statistics
-                count_sms = soup.select_one("#CountSMS").text if soup.select_one("#CountSMS") else '0'
-                paid_sms = soup.select_one("#PaidSMS").text if soup.select_one("#PaidSMS") else '0'
-                unpaid_sms = soup.select_one("#UnpaidSMS").text if soup.select_one("#UnpaidSMS") else '0'
-                revenue_sms = soup.select_one("#RevenueSMS").text.replace(' USD', '') if soup.select_one("#RevenueSMS") else '0'
-                
-                # Extract country/number details
-                sms_details = []
-                items = soup.select("div.item")
-                for item in items:
-                    try:
-                        country_number = item.select_one(".col-sm-4").text.strip()
-                        count = item.select_one(".col-3:nth-child(2) p").text.strip()
-                        paid = item.select_one(".col-3:nth-child(3) p").text.strip()
-                        unpaid = item.select_one(".col-3:nth-child(4) p").text.strip()
-                        revenue = item.select_one(".col-3:nth-child(5) p span.currency_cdr").text.strip()
-                        
-                        sms_details.append({
-                            'country_number': country_number,
-                            'count': count,
-                            'paid': paid,
-                            'unpaid': unpaid,
-                            'revenue': revenue
-                        })
-                    except Exception as e:
-                        continue
-                
-                return {
-                    'count_sms': count_sms,
-                    'paid_sms': paid_sms,
-                    'unpaid_sms': unpaid_sms,
-                    'revenue': revenue_sms,
-                    'sms_details': sms_details
-                }
-            else:
-                logger.error(f"Failed to get SMS data: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error getting SMS data: {e}")
-            return None
-
-# Initialize client
-client = IVASSMSClient()
+# Telegram Bot Token
+BOT_TOKEN = "8483512471:AAHMHkHFpk9vsvRbdkV-WZfiI88p6NBzJTw"
 
 @app.route('/')
 def home():
-    return jsonify({
-        'message': '🚀 IVAS SMS API - Vercel Deployment',
-        'status': 'Ready',
-        'endpoints': {
-            '/health': 'Check API health',
-            '/login': 'Manual login',
-            '/sms': 'Get SMS data (add ?date=DD/MM/YYYY)'
-        },
-        'example': 'https://your-app.vercel.app/sms?date=18/01/2025'
-    })
+    return "🤖 IVAS SMS Telegram Bot is Running!"
 
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'healthy',
-        'logged_in': client.logged_in,
-        'timestamp': datetime.now().isoformat()
-    })
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        data = request.get_json()
+        logging.info(f"Received update: {data}")
+        
+        if 'message' in data:
+            chat_id = data['message']['chat']['id']
+            text = data['message'].get('text', '')
+            username = data['message']['chat'].get('username', 'Unknown')
+            
+            logging.info(f"Message from {username}: {text}")
+            
+            # Command handling
+            if text == '/start':
+                welcome_msg = f"""👋 Hello {username}!
 
-@app.route('/login')
-def login():
-    if client.login_with_cookies():
+🤖 <b>Welcome to IVAS SMS Bot</b>
+
+📊 <b>Get your SMS data directly on Telegram!</b>
+
+<b>Available Commands:</b>
+/start - Show welcome message
+/sms - Get SMS data for today
+/help - Show help guide
+
+<b>Example:</b>
+<code>/sms 18/01/2025</code>"""
+                send_telegram_message(chat_id, welcome_msg)
+                
+            elif text.startswith('/sms'):
+                parts = text.split()
+                if len(parts) == 1:
+                    # Default to today's date
+                    today = datetime.now().strftime('%d/%m/%Y')
+                    date_str = today
+                elif len(parts) == 2:
+                    date_str = parts[1]
+                    try:
+                        datetime.strptime(date_str, '%d/%m/%Y')
+                    except ValueError:
+                        send_telegram_message(chat_id, "❌ <b>Invalid date format!</b>\n\nPlease use: <code>DD/MM/YYYY</code>\nExample: <code>/sms 18/01/2025</code>")
+                        return jsonify({"status": "success"})
+                else:
+                    send_telegram_message(chat_id, "❌ <b>Invalid command!</b>\n\nUsage: <code>/sms</code> or <code>/sms DD/MM/YYYY</code>")
+                    return jsonify({"status": "success"})
+                
+                # Send processing message
+                processing_msg = f"⏳ <b>Fetching SMS data for</b> <code>{date_str}</code>\n\nPlease wait..."
+                send_telegram_message(chat_id, processing_msg)
+                
+                # Call your IVAS SMS API
+                try:
+                    vercel_url = os.getenv('VERCEL_URL', 'your-app.vercel.app')
+                    sms_api_url = f"https://{vercel_url}/sms?date={date_str}"
+                    
+                    response = requests.get(sms_api_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        sms_data = response.json()
+                        
+                        if 'data' in sms_data:
+                            stats = sms_data['data']
+                            result_msg = f"""📊 <b>SMS Report - {date_str}</b>
+
+📨 <b>Total SMS:</b> {stats.get('count_sms', '0')}
+✅ <b>Paid SMS:</b> {stats.get('paid_sms', '0')}
+❌ <b>Unpaid SMS:</b> {stats.get('unpaid_sms', '0')}
+💰 <b>Revenue:</b> ${stats.get('revenue', '0')}
+
+📈 <b>Country Stats:</b>"""
+                            
+                            # Add country details
+                            for detail in stats.get('sms_details', [])[:5]:  # First 5 countries
+                                result_msg += f"\n🌍 {detail['country_number']}: {detail['count']} SMS"
+                            
+                            if len(stats.get('sms_details', [])) > 5:
+                                result_msg += f"\n... and {len(stats.get('sms_details', [])) - 5} more countries"
+                                
+                        else:
+                            result_msg = f"✅ <b>SMS data for {date_str}</b>\n\n{sms_data.get('message', 'Data retrieved successfully!')}"
+                        
+                    else:
+                        result_msg = "❌ <b>Failed to fetch SMS data</b>\n\nPlease try again later or check your IVAS SMS login."
+                    
+                except Exception as e:
+                    logging.error(f"SMS API error: {e}")
+                    result_msg = "❌ <b>Error fetching data</b>\n\nPlease check if your IVAS SMS API is working."
+                
+                send_telegram_message(chat_id, result_msg)
+                
+            elif text == '/help':
+                help_msg = """🆘 <b>IVAS SMS Bot Help</b>
+
+<b>Commands:</b>
+• /start - Start the bot
+• /sms - Get today's SMS data
+• /sms DD/MM/YYYY - Get SMS data for specific date
+• /help - Show this help
+
+<b>Date Format:</b>
+<code>DD/MM/YYYY</code>
+
+<b>Examples:</b>
+<code>/sms</code> - Today's data
+<code>/sms 18/01/2025</code>
+<code>/sms 20/01/2025</code>
+
+<b>Note:</b>
+Make sure your IVAS SMS API is properly configured with valid cookies."""
+                send_telegram_message(chat_id, help_msg)
+            
+            else:
+                send_telegram_message(chat_id, "🤖 <b>I didn't understand that!</b>\n\nUse /help to see available commands.")
+        
+        return jsonify({"status": "success"})
+        
+    except Exception as e:
+        logging.error(f"Webhook error: {e}")
+        return jsonify({"status": "error"})
+
+def send_telegram_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.json()
+    except Exception as e:
+        logging.error(f"Telegram send message error: {e}")
+
+# Webhook setup endpoint
+@app.route('/set_webhook')
+def set_webhook():
+    vercel_url = os.getenv('VERCEL_URL')
+    if not vercel_url:
+        return "❌ VERCEL_URL environment variable not set"
+    
+    webhook_url = f"https://{vercel_url}/webhook"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
+    
+    try:
+        response = requests.get(url)
+        result = response.json()
         return jsonify({
-            'status': 'success',
-            'message': 'Logged in successfully',
-            'logged_in': True
+            "status": "success" if result.get('ok') else "error",
+            "message": result.get('description', 'Unknown error')
         })
-    else:
-        return jsonify({
-            'status': 'error',
-            'message': 'Login failed - check COOKIES_JSON',
-            'logged_in': False
-        }), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
-@app.route('/sms')
-def get_sms():
-    # Auto-login if not logged in
-    if not client.logged_in:
-        if not client.login_with_cookies():
-            return jsonify({
-                'error': 'Authentication failed'
-            }), 401
-    
-    date_str = request.args.get('date', '')
-    to_date_str = request.args.get('to_date', '')
-    
-    # Validate date format
-    if date_str:
-        try:
-            datetime.strptime(date_str, '%d/%m/%Y')
-        except ValueError:
-            return jsonify({
-                'error': 'Invalid date format. Use DD/MM/YYYY'
-            }), 400
-    
-    if to_date_str:
-        try:
-            datetime.strptime(to_date_str, '%d/%m/%Y')
-        except ValueError:
-            return jsonify({
-                'error': 'Invalid to_date format. Use DD/MM/YYYY'
-            }), 400
-    
-    logger.info(f"Fetching SMS data for: {date_str} to {to_date_str}")
-    
-    result = client.get_sms_data(from_date=date_str, to_date=to_date_str)
-    
-    if result:
-        return jsonify({
-            'status': 'success',
-            'from_date': date_str,
-            'to_date': to_date_str,
-            'data': result
-        })
-    else:
-        return jsonify({
-            'error': 'Failed to fetch SMS data'
-        }), 500
+# Remove webhook
+@app.route('/remove_webhook')
+def remove_webhook():
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url="
+    try:
+        response = requests.get(url)
+        return response.json()
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
-# Vercel handler
 if __name__ == '__main__':
     app.run(debug=False)
